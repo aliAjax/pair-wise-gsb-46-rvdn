@@ -12,6 +12,8 @@ from .domain import Actor, DomainError, PermissionDenied, ValidationError
 RECORD_RE = re.compile(r"^/api/records/(\d+)$")
 ACTION_RE = re.compile(r"^/api/records/(\d+)/actions/([a-z_]+)$")
 AUDIT_RE = re.compile(r"^/api/records/(\d+)/audit$")
+HOSPITAL_RE = re.compile(r"^/api/hospitals/(\d+)$")
+HOSPITAL_UPDATE_RE = re.compile(r"^/api/hospitals/(\d+)/update$")
 
 
 def make_handler(service: Any, static_dir: Path):
@@ -76,6 +78,13 @@ def make_handler(service: Any, static_dir: Path):
                     records = service.list_records(self._actor(), state=query.get("state", [None])[0], limit=int(query.get("limit", ["100"])[0]))
                     self._send(200, {"items": records})
                     return
+                if parsed.path == "/api/hospitals":
+                    self._send(200, {"items": service.list_hospitals(self._actor())})
+                    return
+                match = HOSPITAL_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.get_hospital(self._actor(), int(match.group(1))))
+                    return
                 match = RECORD_RE.match(parsed.path)
                 if match:
                     self._send(200, service.get_record(self._actor(), int(match.group(1))))
@@ -98,6 +107,13 @@ def make_handler(service: Any, static_dir: Path):
                 if parsed.path == "/api/records":
                     record = service.create(self._actor(), body.get("reference", ""), body.get("data", {}))
                     self._send(201, record)
+                    return
+                if parsed.path == "/api/hospitals":
+                    self._send(201, service.create_hospital(self._actor(), body.get("data", {})))
+                    return
+                match = HOSPITAL_UPDATE_RE.match(parsed.path)
+                if match:
+                    self._send(200, service.update_hospital(self._actor(), int(match.group(1)), body.get("data", {})))
                     return
                 match = ACTION_RE.match(parsed.path)
                 if match:

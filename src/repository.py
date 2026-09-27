@@ -47,6 +47,18 @@ class Repository:
                     details TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS hospitals (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    capabilities TEXT NOT NULL,
+                    total_beds INTEGER NOT NULL,
+                    available_beds INTEGER NOT NULL,
+                    drive_minutes INTEGER NOT NULL,
+                    created_by TEXT NOT NULL,
+                    updated_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
                 CREATE INDEX IF NOT EXISTS idx_records_state ON records(state);
                 CREATE INDEX IF NOT EXISTS idx_audit_record ON audit_events(record_id, id);
                 """
@@ -136,6 +148,80 @@ class Repository:
             item["details"] = json.loads(item["details"])
             result.append(item)
         return result
+
+    @staticmethod
+    def _hospital_row(row: sqlite3.Row) -> Dict[str, Any]:
+        item = dict(row)
+        item["capabilities"] = json.loads(item["capabilities"])
+        return item
+
+    def create_hospital(self, name: str, capabilities: List[str], total_beds: int, available_beds: int, drive_minutes: int, actor_id: str) -> Dict[str, Any]:
+        now = _now()
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute(
+                    "INSERT INTO hospitals(name,capabilities,total_beds,available_beds,drive_minutes,created_by,updated_by,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (name, json.dumps(capabilities, ensure_ascii=False), total_beds, available_beds, drive_minutes, actor_id, actor_id, now, now),
+                )
+                hospital_id = int(cursor.lastrowid)
+                row = connection.execute("SELECT * FROM hospitals WHERE id=?", (hospital_id,)).fetchone()
+        except sqlite3.IntegrityError as exc:
+            raise Conflict("医院名称已存在") from exc
+        return self._hospital_row(row)
+
+    def get_hospital(self, hospital_id: int) -> Dict[str, Any]:
+        with self._connect() as connection:
+            row = connection.execute("SELECT * FROM hospitals WHERE id=?", (hospital_id,)).fetchone()
+        if row is None:
+            raise NotFound("医院不存在")
+        return self._hospital_row(row)
+
+    def list_hospitals(self) -> List[Dict[str, Any]]:
+        with self._connect() as connection:
+            rows = connection.execute("SELECT * FROM hospitals ORDER BY drive_minutes ASC, id ASC").fetchall()
+        return [self._hospital_row(row) for row in rows]
+
+    def update_hospital(self, hospital_id: int, fields: Dict[str, Any], actor_id: str) -> Dict[str, Any]:
+        columns = []
+        values = []
+        for key in ("name", "total_beds", "available_beds", "drive_minutes"):
+            if key in fields:
+                columns.append("%s=?" % key)
+                values.append(fields[key])
+        if "capabilities" in fields:
+            columns.append("capabilities=?")
+            values.append(json.dumps(fields["capabilities"], ensure_ascii=False))
+        if not columns:
+            return self.get_hospital(hospital_id)
+        columns.extend(["updated_by=?", "updated_at=?"])
+        values.extend([actor_id, _now(), hospital_id])
+        try:
+            with self._connect() as connection:
+                cursor = connection.execute("UPDATE hospitals SET %s WHERE id=?" % ", ".join(columns), values)
+                if cursor.rowcount != 1:
+                    raise NotFound("医院不存在")
+                row = connection.execute("SELECT * FROM hospitals WHERE id=?", (hospital_id,)).fetchone()
+        except sqlite3.IntegrityError as exc:
+            raise Conflict("医院名称已存在") from exc
+        return self._hospital_row(row)
+
+    def reserve_bed(self, hospital_id: int) -> bool:
+        """原子占床：仅当仍有空床时扣减，返回是否成功。"""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE hospitals SET available_beds = available_beds - 1, updated_at=? WHERE id=? AND available_beds > 0",
+                (_now(), hospital_id),
+            )
+            return cursor.rowcount == 1
+
+    def release_bed(self, hospital_id: int) -> bool:
+        """释放床位：可用床位回升但不超过总床位。"""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE hospitals SET available_beds = MIN(available_beds + 1, total_beds), updated_at=? WHERE id=?",
+                (_now(), hospital_id),
+            )
+            return cursor.rowcount == 1
 
     def stats(self) -> Dict[str, int]:
         with self._connect() as connection:

@@ -14,6 +14,7 @@ class WorkflowTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.service = build_service(str(Path(self.temp.name) / "test.db"))
+        self.service.create_hospital(Actor("coord", "hospital_coordinator"), {"name": "City Hospital", "capabilities": ["BLS", "ALS"], "total_beds": 4, "drive_minutes": 12})
 
     def tearDown(self):
         self.temp.cleanup()
@@ -24,6 +25,12 @@ class WorkflowTest(unittest.TestCase):
         for action, role, data, expected_state in FLOW:
             record = self.service.act(Actor("operator", role), record["id"], record["version"], action, data)
             self.assertEqual(record["state"], expected_state)
+        self.assertEqual(record["payload"]["hospital_name"], "City Hospital")
+        self.assertEqual(record["payload"]["hospital_drive_minutes"], 12)
+        self.assertTrue(record["payload"]["bed_reserved"])
         timeline = self.service.timeline(Actor("creator", "dispatcher"), record["id"])
         self.assertEqual(len(timeline), len(FLOW) + 1)
         self.assertEqual(timeline[-1]["action"], FLOW[-1][0])
+        assign_event = [event for event in timeline if event["action"] == "assign"][0]
+        self.assertEqual(assign_event["details"]["input"]["hospital"]["name"], "City Hospital")
+        self.assertIn("占床", assign_event["details"]["summary"])

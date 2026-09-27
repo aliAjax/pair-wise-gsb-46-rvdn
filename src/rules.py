@@ -1,17 +1,21 @@
 """急救车调度与目的地分流领域规则与状态转换。"""
-from typing import Any, Dict, Iterable, Tuple
+from typing import Any, Dict, Iterable, List, Tuple
 
-from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, text, text_list
+from .domain import Actor, Conflict, ValidationError, boolean, choice, integer, number, optional_text, text, text_list
 
 
 INITIAL_STATE = "received"
 CREATE_ROLES = {'dispatcher'}
 ACTION_ROLES = {'assign': {'dispatcher'}, 'enroute': {'dispatcher', 'paramedic'}, 'arrive': {'paramedic'}, 'transport': {'paramedic', 'hospital_coordinator'}, 'handover': {'paramedic', 'hospital_coordinator'}, 'cancel': {'dispatcher'}}
 TRANSITIONS = {'assign': {'received': 'assigned'}, 'enroute': {'assigned': 'enroute'}, 'arrive': {'enroute': 'onscene'}, 'transport': {'onscene': 'transporting'}, 'handover': {'transporting': 'closed'}, 'cancel': {'received': 'cancelled', 'assigned': 'cancelled', 'enroute': 'cancelled'}}
+CAPABILITIES = ("BLS", "ALS")
+HOSPITAL_ROLES = {'hospital_coordinator'}
+MAX_DRIVE_MINUTES = 20
 
 
 class DomainRules:
     INITIAL_STATE = INITIAL_STATE
+    MAX_DRIVE_MINUTES = MAX_DRIVE_MINUTES
 
     def known_role(self, role: str) -> bool:
         all_roles = set(CREATE_ROLES)
@@ -25,6 +29,57 @@ class DomainRules:
     def role_can_action(self, role: str, action: str) -> bool:
         return role == "admin" or role in ACTION_ROLES.get(action, set())
 
+    def role_can_manage_hospital(self, role: str) -> bool:
+        return role == "admin" or role in HOSPITAL_ROLES
+
+    def hospital_covers(self, capabilities: Iterable[str], required_capability: str) -> bool:
+        caps = set(capabilities)
+        return "ALS" in caps or required_capability in caps
+
+    def rank_hospitals(self, hospitals: Iterable[Dict[str, Any]], required_capability: str, max_drive_minutes: int = MAX_DRIVE_MINUTES) -> List[Dict[str, Any]]:
+        candidates = [
+            hospital for hospital in hospitals
+            if self.hospital_covers(hospital["capabilities"], required_capability) and int(hospital["drive_minutes"]) <= max_drive_minutes
+        ]
+        return sorted(candidates, key=lambda hospital: (hospital["drive_minutes"], hospital["id"]))
+
+    def _validate_capabilities(self, payload: Dict[str, Any]) -> List[str]:
+        caps = text_list(payload, "capabilities", 1)
+        if any(cap not in CAPABILITIES for cap in caps):
+            raise ValidationError("capabilities只能是%s" % "/".join(CAPABILITIES))
+        return caps
+
+    def validate_hospital(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        p = dict(payload)
+        p["name"] = text(p, "name")
+        p["capabilities"] = self._validate_capabilities(p)
+        p["total_beds"] = integer(p, "total_beds", 0)
+        p["drive_minutes"] = integer(p, "drive_minutes", 1, 240)
+        if p.get("available_beds") is None:
+            p["available_beds"] = p["total_beds"]
+        else:
+            p["available_beds"] = integer(p, "available_beds", 0)
+        if p["available_beds"] > p["total_beds"]:
+            raise ValidationError("available_beds不能大于total_beds")
+        return p
+
+    def validate_hospital_update(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        p = dict(payload)
+        result: Dict[str, Any] = {}
+        if "name" in p:
+            result["name"] = text(p, "name")
+        if "capabilities" in p:
+            result["capabilities"] = self._validate_capabilities(p)
+        if "total_beds" in p:
+            result["total_beds"] = integer(p, "total_beds", 0)
+        if "drive_minutes" in p:
+            result["drive_minutes"] = integer(p, "drive_minutes", 1, 240)
+        if "available_beds" in p:
+            result["available_beds"] = integer(p, "available_beds", 0)
+        if not result:
+            raise ValidationError("没有可更新的字段")
+        return result
+
     def validate_create(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         p = dict(payload)
         choice(p, "patient_priority", ["critical", "urgent", "stable"])
@@ -32,8 +87,9 @@ class DomainRules:
         integer(p, "eta_minutes", 1, 240)
         choice(p, "required_capability", ["BLS", "ALS"])
         choice(p, "vehicle_capability", ["BLS", "ALS"])
-        integer(p, "hospital_beds", 0)
-        text(p, "destination")
+        if p.get("hospital_beds") is not None:
+            integer(p, "hospital_beds", 0)
+        p["destination"] = optional_text(p, "destination")
         text(p, "location")
         return p
 
@@ -69,11 +125,23 @@ class DomainRules:
         if action == "assign":
             if not boolean(data, "vehicle_available"):
                 raise ValidationError("车辆当前不可用")
-            if not p["capability_ok"] or float(p["hospital_beds"]) <= 0:
-                raise ValidationError("车辆能力或医院床位不满足")
+            if not p["capability_ok"]:
+                raise ValidationError("车辆能力不满足病人所需能力")
+            hospital = data.get("hospital")
+            if not isinstance(hospital, dict) or not hospital.get("id") or not hospital.get("name"):
+                raise ValidationError("未选择目的地医院")
             changes["assigned_vehicle_id"] = text(data, "vehicle_id")
             changes["assigned"] = True
-            summary = "已完成派车"
+            changes["hospital_id"] = int(hospital["id"])
+            changes["hospital_name"] = str(hospital["name"])
+            changes["hospital_drive_minutes"] = int(hospital["drive_minutes"])
+            changes["bed_reserved"] = True
+            reasons = data.get("reselect_reasons") or []
+            if reasons:
+                changes["reselect_reasons"] = reasons
+            summary = "已派车并占床：%s（车程%s分钟）" % (hospital["name"], hospital["drive_minutes"])
+            if reasons:
+                summary += "；自动改选：" + "；".join("%s(%s)" % (item.get("hospital_name"), item.get("reason")) for item in reasons)
         elif action == "enroute":
             traffic = choice(data, "traffic_level", ["low", "medium", "high"])
             factor = {"low": 1.0, "medium": 1.2, "high": 1.5}[traffic]

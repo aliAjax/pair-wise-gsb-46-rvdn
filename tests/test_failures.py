@@ -14,6 +14,7 @@ class FailureTest(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.service = build_service(str(Path(self.temp.name) / "test.db"))
+        self.service.create_hospital(Actor("coord", "hospital_coordinator"), {"name": "City Hospital", "capabilities": ["BLS", "ALS"], "total_beds": 4, "drive_minutes": 12})
 
     def tearDown(self):
         self.temp.cleanup()
