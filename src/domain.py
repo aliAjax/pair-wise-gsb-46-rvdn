@@ -28,6 +28,11 @@ class PermissionDenied(DomainError):
     code = "permission_denied"
 
 
+class NoDestination(DomainError):
+    status = 422
+    code = "no_destination"
+
+
 @dataclass(frozen=True)
 class Actor:
     user_id: str

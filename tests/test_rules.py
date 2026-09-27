@@ -1,11 +1,15 @@
 import unittest
 
 from src.domain import Actor, ValidationError
-from src.rules import DomainRules
+from src.rules import DomainRules, select_destination
 
 
-CREATE_DATA = {'patient_priority': 'critical', 'distance_km': 7.5, 'eta_minutes': 9, 'required_capability': 'ALS', 'vehicle_capability': 'ALS', 'hospital_beds': 4, 'destination': 'City Hospital', 'location': 'East Gate'}
-FLOW = [('assign', 'dispatcher', {'vehicle_available': True, 'vehicle_id': 'AMB-07'}, 'assigned'), ('enroute', 'paramedic', {'traffic_level': 'medium'}, 'enroute'), ('arrive', 'paramedic', {'on_scene': True}, 'onscene'), ('transport', 'paramedic', {'destination_beds': 2}, 'transporting'), ('handover', 'hospital_coordinator', {'handover_accepted': True}, 'closed')]
+CREATE_DATA = {'patient_priority': 'critical', 'distance_km': 7.5, 'eta_minutes': 9, 'required_capability': 'ALS', 'vehicle_capability': 'ALS', 'location': 'East Gate'}
+FLOW = [('assign', 'dispatcher', {'vehicle_available': True, 'vehicle_id': 'AMB-07'}, 'assigned'), ('enroute', 'paramedic', {'traffic_level': 'medium'}, 'enroute'), ('arrive', 'paramedic', {'on_scene': True}, 'onscene'), ('transport', 'paramedic', {}, 'transporting'), ('handover', 'hospital_coordinator', {'handover_accepted': True}, 'closed')]
+
+
+def hospital(hid, capability, drive, beds, name=None):
+    return {'id': hid, 'code': 'H%s' % hid, 'name': name or 'Hospital-%s' % hid, 'capability': capability, 'drive_minutes': drive, 'available_beds': beds, 'total_beds': max(beds, 1), 'active': True}
 
 
 class RulesTest(unittest.TestCase):
@@ -30,3 +34,28 @@ class RulesTest(unittest.TestCase):
         invalid["patient_priority"] = 'unknown'
         with self.assertRaises(ValidationError):
             self.rules.prepare_create(invalid)
+
+    def test_select_destination_capability_first(self):
+        hospitals = [hospital(1, "BLS", 3, 5), hospital(2, "ALS", 15, 1)]
+        chosen, reroutes = select_destination(hospitals, "ALS")
+        self.assertEqual(chosen["id"], 2)
+        self.assertEqual(reroutes, [])
+        chosen, reroutes = select_destination(hospitals, "BLS")
+        self.assertEqual(chosen["id"], 1)
+
+    def test_select_destination_window_and_reroute(self):
+        hospitals = [hospital(1, "ALS", 5, 0), hospital(2, "ALS", 18, 2), hospital(3, "ALS", 30, 9)]
+        chosen, reroutes = select_destination(hospitals, "ALS")
+        self.assertEqual(chosen["id"], 2)
+        self.assertEqual(reroutes, [{"hospital_id": 1, "hospital_name": "Hospital-1", "reason": "床位已满"}])
+
+    def test_select_destination_none_when_no_capability_or_beds(self):
+        chosen, reroutes = select_destination([hospital(1, "BLS", 3, 5)], "ALS")
+        self.assertIsNone(chosen)
+        self.assertEqual(reroutes, [])
+        chosen, reroutes = select_destination([hospital(1, "ALS", 3, 0)], "ALS")
+        self.assertIsNone(chosen)
+        self.assertEqual(len(reroutes), 1)
+        chosen, reroutes = select_destination([hospital(1, "ALS", 25, 3)], "ALS")
+        self.assertIsNone(chosen)
+        self.assertEqual(reroutes, [])
